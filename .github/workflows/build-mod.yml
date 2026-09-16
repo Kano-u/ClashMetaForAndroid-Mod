@@ -160,6 +160,27 @@ jobs:
           set -euo pipefail
           git -C upstream apply --3way --verbose "$GITHUB_WORKSPACE/$PATCH_FILE"
 
+      # 上游的 tag 指向的提交里版本号仍是上一个版本（官方 release 也是在编译前改写版本号），
+      # 这里按 tag 名对齐 versionName / versionCode，保证 mod 版与官方同版本号。
+      - name: Normalize version to upstream tag
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ needs.resolve.outputs.version }}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          VERSION_CODE="$(printf '%1d%02d%03d' "$MAJOR" "$MINOR" "$PATCH")"
+
+          sed -i -E "s|^([[:space:]]*versionName[[:space:]]*=[[:space:]]*)\"[^\"]*\"|\1\"$VERSION\"|" \
+            upstream/build.gradle.kts
+          sed -i -E "s|^([[:space:]]*versionCode[[:space:]]*=[[:space:]]*)[0-9]+|\1$VERSION_CODE|" \
+            upstream/build.gradle.kts
+
+          grep -qE "^[[:space:]]*versionName[[:space:]]*=[[:space:]]*\"$VERSION\"" upstream/build.gradle.kts
+          grep -qE "^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*$VERSION_CODE$" upstream/build.gradle.kts
+
+          echo "版本已对齐：${VERSION} (${VERSION_CODE})"
+          grep -nE '^[[:space:]]*version(Name|Code)[[:space:]]*=' upstream/build.gradle.kts | head -4
+
       - name: Setup Java
         uses: actions/setup-java@v5
         with:

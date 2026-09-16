@@ -34,7 +34,7 @@
 
 1. 取上游最新 `vX.Y.Z` 标签；
 2. 若 `vX.Y.Z-mod.N` 这个 Release 已存在就跳过（上游没更新时不会白跑一次完整编译）；
-3. 否则拉取上游源码 → `git apply --3way` 打补丁 → 编译 `app:assembleMetaRelease` → 用固定密钥签名 → 发布 Release。
+3. 否则拉取上游源码 → `git apply --3way` 打补丁 → 把 `versionName`/`versionCode` 按 tag 对齐（上游 tag 里记录的版本号比 tag 本身低一位，官方 release 也是在编译前改写版本号）→ 编译 `app:assembleMetaRelease` → 用固定密钥签名 → 发布 Release。
 
 如果上游改到了补丁涉及的代码导致打不上，工作流不会硬来：`Patch applies` 任务会失败并自动开一个标题以「补丁冲突」开头的 issue。修复方式：
 
