@@ -42,6 +42,8 @@
 2. 把 `patch-revision.txt` 加 1；
 3. 提交后工作流会自动重新构建并发布，关闭 issue。
 
+小提示：GitHub 会在仓库长期（约 60 天）没有任何活动时自动暂停定时任务。如果发现很久没自动构建，去 Actions 页面点一下 `Build Mod APK` 的 `Enable workflow`，或手动 `Run workflow` 一次即可。
+
 ## 签名密钥
 
 密钥（JKS）保存为私有仓库 `Kano-u/ClashMetaForAndroid-Mod-Keys` 的 Actions 密钥材料和仓库文件，公开仓库里只保存 4 个 Secrets：`KEYSTORE_B64`、`KEYSTORE_PASSWORD`、`KEY_ALIAS`、`KEY_PASSWORD`。
