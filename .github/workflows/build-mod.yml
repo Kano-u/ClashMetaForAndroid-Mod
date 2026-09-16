@@ -1,0 +1,263 @@
+name: Build Mod APK
+
+# 拉取上游最新 release 标签 → 打补丁 → 云端签名编译 → 发布 APK。
+# 补丁无法应用时自动开 issue 提醒，不会自动改写代码。
+on:
+  schedule:
+    # 每天 UTC 18:00 = 北京时间 02:00
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "上游 tag 或分支（留空 = 自动取最新 release tag）"
+        required: false
+        default: ""
+      force:
+        description: "强制重新构建（即使该版本已发布过）"
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - "patches/**"
+      - "patch-revision.txt"
+      - ".github/workflows/build-mod.yml"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: build-mod
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/MetaCubeX/ClashMetaForAndroid.git
+  PATCH_FILE: patches/0001-home-access-control.patch
+
+jobs:
+  resolve:
+    name: Resolve upstream version
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_ref: ${{ steps.resolve.outputs.upstream_ref }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_REF: ${{ inputs.upstream_ref }}
+          INPUT_FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          REV="$(tr -d '[:space:]' < patch-revision.txt)"
+          if [ -z "$REV" ]; then
+            echo "patch-revision.txt 内容为空"
+            exit 1
+          fi
+
+          REF="${INPUT_REF:-}"
+          if [ -z "$REF" ]; then
+            REF="$(git ls-remote --tags --refs "$UPSTREAM_URL" \
+              | awk -F'refs/tags/' '{print $2}' \
+              | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V | tail -n1)"
+          fi
+          if [ -z "$REF" ]; then
+            echo "无法解析上游版本"
+            exit 1
+          fi
+
+          VERSION="${REF#v}"
+          TAG="v${VERSION}-mod.${REV}"
+
+          echo "upstream_ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          if [ "${INPUT_FORCE}" = "true" ]; then
+            SKIP="false"
+          elif gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            SKIP="true"
+          else
+            SKIP="false"
+          fi
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+
+          echo "上游版本：$REF"
+          echo "补丁版本：$REV"
+          echo "发布标签：$TAG"
+          echo "跳过构建：$SKIP"
+
+  patch-check:
+    name: Patch applies
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Clone upstream (shallow)
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch "${{ needs.resolve.outputs.upstream_ref }}" \
+            "$UPSTREAM_URL" upstream
+
+      - name: Apply patch
+        id: apply
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git -C upstream apply --3way --verbose "$GITHUB_WORKSPACE/$PATCH_FILE"
+
+      - name: Open issue when patch conflicts
+        if: steps.apply.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="补丁冲突：上游 ${{ needs.resolve.outputs.upstream_ref }} 无法应用 $PATCH_FILE"
+          FOUND="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$TITLE in:title" --json number --jq 'length')"
+          if [ "$FOUND" = "0" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --body "上游代码变动导致补丁无法应用。请更新 $PATCH_FILE 并递增 patch-revision.txt，修复后关闭本 issue。"
+          fi
+          exit 1
+
+      - name: Show applied changes
+        if: steps.apply.outcome == 'success'
+        run: git -C upstream diff --cached --stat
+
+  build:
+    name: Build and release
+    needs: [resolve, patch-check]
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Clone upstream ${{ needs.resolve.outputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ needs.resolve.outputs.upstream_ref }}" "$UPSTREAM_URL" upstream
+          cd upstream
+          git submodule update --init --recursive --force
+
+      - name: Apply UI patch
+        run: |
+          set -euo pipefail
+          git -C upstream apply --3way --verbose "$GITHUB_WORKSPACE/$PATCH_FILE"
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+          go-version: '1.26'
+
+      - name: Apply Go patches
+        run: |
+          set -euo pipefail
+          cd "$(go env GOROOT)"
+          for p in "$GITHUB_WORKSPACE"/upstream/.github/patch/*.patch; do
+            patch --verbose -p 1 < "$p"
+          done
+
+      - name: Go cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('upstream/**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Update CA
+        run: |
+          sudo apt-get update && sudo apt-get install -y ca-certificates
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt \
+            upstream/core/src/foss/golang/clash/component/ca/ca-certificates.crt
+
+      - name: Write signing files
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "缺少 KEYSTORE_B64 secret"
+            exit 1
+          fi
+
+          printf '%s' "$KEYSTORE_B64" | base64 -d > upstream/release.keystore
+          keytool -list -keystore upstream/release.keystore -storepass "$KEYSTORE_PASSWORD" | head -20
+
+          {
+            echo "keystore.password=$KEYSTORE_PASSWORD"
+            echo "key.alias=$KEY_ALIAS"
+            echo "key.password=$KEY_PASSWORD"
+          } > upstream/signing.properties
+
+          sha256sum upstream/release.keystore
+
+      - name: Build release APKs
+        run: |
+          set -euo pipefail
+          cd upstream
+          ./gradlew --no-daemon app:assembleMetaRelease
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: cmfa-mod-${{ needs.resolve.outputs.tag }}
+          path: upstream/app/build/outputs/apk/meta/release/*.apk
+          if-no-files-found: error
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.resolve.outputs.tag }}"
+          REF="${{ needs.resolve.outputs.upstream_ref }}"
+          REV="$(tr -d '[:space:]' < patch-revision.txt)"
+
+          NOTES="上游版本：$REF
+          补丁版本：$REV
+          包名：com.github.metacubex.clash.meta（与官方一致；签名不同，首次安装需先卸载官方版）
+
+          改动内容：主页面「日志」上方新增「访问控制模式」与「访问控制应用包列表」两项。
+          arm64 手机下载 *arm64-v8a*，不确定就下载 *universal*。"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              upstream/app/build/outputs/apk/meta/release/*.apk
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes "$NOTES" \
+              upstream/app/build/outputs/apk/meta/release/*.apk
+          fi

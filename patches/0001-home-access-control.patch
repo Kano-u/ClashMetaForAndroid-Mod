@@ -1,0 +1,220 @@
+diff --git a/app/src/main/java/com/github/kr328/clash/MainActivity.kt b/app/src/main/java/com/github/kr328/clash/MainActivity.kt
+index ea8254c..eaf4a7f 100644
+--- a/app/src/main/java/com/github/kr328/clash/MainActivity.kt
++++ b/app/src/main/java/com/github/kr328/clash/MainActivity.kt
+@@ -17,6 +17,7 @@ import com.github.kr328.clash.common.util.intent
+ import com.github.kr328.clash.common.util.ticker
+ import com.github.kr328.clash.design.MainDesign
+ import com.github.kr328.clash.design.ui.ToastDuration
++import com.github.kr328.clash.service.store.ServiceStore
+ import com.github.kr328.clash.util.startClashService
+ import com.github.kr328.clash.util.stopClashService
+ import com.github.kr328.clash.util.withClash
+@@ -24,12 +25,15 @@ import com.github.kr328.clash.util.withProfile
+ import com.github.kr328.clash.core.bridge.*
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.isActive
++import kotlinx.coroutines.launch
+ import kotlinx.coroutines.selects.select
+ import kotlinx.coroutines.withContext
+ import java.util.concurrent.TimeUnit
+ import com.github.kr328.clash.design.R as DesignR
+ 
+ class MainActivity : BaseActivity<MainDesign>() {
++    private val serviceStore by lazy { ServiceStore(this) }
++
+     override suspend fun main() {
+         val design = MainDesign(this)
+ 
+@@ -77,6 +81,27 @@ class MainActivity : BaseActivity<MainDesign>() {
+                             startActivity(HelpActivity::class.intent)
+                         MainDesign.Request.OpenAbout ->
+                             design.showAbout(queryAppVersionName())
++                        MainDesign.Request.OpenAccessControlMode -> {
++                            if (clashRunning) {
++                                design.showToast(DesignR.string.options_unavailable, ToastDuration.Long)
++                            } else {
++                                val current = withContext(Dispatchers.IO) {
++                                    serviceStore.accessControlMode
++                                }
++
++                                design.showAccessControlModeDialog(current) { mode ->
++                                    launch {
++                                        withContext(Dispatchers.IO) {
++                                            serviceStore.accessControlMode = mode
++                                        }
++
++                                        design.setAccessControlMode(mode)
++                                    }
++                                }
++                            }
++                        }
++                        MainDesign.Request.OpenAccessControlPackages ->
++                            startActivity(AccessControlActivity::class.intent)
+                     }
+                 }
+                 if (clashRunning) {
+@@ -104,6 +129,9 @@ class MainActivity : BaseActivity<MainDesign>() {
+         withProfile {
+             setProfileName(queryActive()?.name)
+         }
++
++        setAccessControlMode(withContext(Dispatchers.IO) { serviceStore.accessControlMode })
++        setAccessControlPackages(withContext(Dispatchers.IO) { serviceStore.accessControlPackages.size })
+     }
+ 
+     private suspend fun MainDesign.fetchTraffic() {
+diff --git a/design/src/main/java/com/github/kr328/clash/design/MainDesign.kt b/design/src/main/java/com/github/kr328/clash/design/MainDesign.kt
+index f418e48..5fb21dd 100644
+--- a/design/src/main/java/com/github/kr328/clash/design/MainDesign.kt
++++ b/design/src/main/java/com/github/kr328/clash/design/MainDesign.kt
+@@ -10,6 +10,7 @@ import com.github.kr328.clash.design.databinding.DesignMainBinding
+ import com.github.kr328.clash.design.util.layoutInflater
+ import com.github.kr328.clash.design.util.resolveThemedColor
+ import com.github.kr328.clash.design.util.root
++import com.github.kr328.clash.service.model.AccessControlMode
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+ 
+@@ -23,6 +24,8 @@ class MainDesign(context: Context) : Design<MainDesign.Request>(context) {
+         OpenSettings,
+         OpenHelp,
+         OpenAbout,
++        OpenAccessControlMode,
++        OpenAccessControlPackages,
+     }
+ 
+     private val binding = DesignMainBinding
+@@ -66,6 +69,49 @@ class MainDesign(context: Context) : Design<MainDesign.Request>(context) {
+         }
+     }
+ 
++    suspend fun setAccessControlMode(mode: AccessControlMode) {
++        withContext(Dispatchers.Main) {
++            binding.accessControlMode = when (mode) {
++                AccessControlMode.AcceptAll -> context.getString(R.string.allow_all_apps)
++                AccessControlMode.AcceptSelected -> context.getString(R.string.allow_selected_apps)
++                AccessControlMode.DenySelected -> context.getString(R.string.deny_selected_apps)
++            }
++        }
++    }
++
++    suspend fun setAccessControlPackages(count: Int) {
++        withContext(Dispatchers.Main) {
++            binding.accessControlPackages =
++                context.getString(R.string.format_access_control_packages_selected, count)
++        }
++    }
++
++    suspend fun showAccessControlModeDialog(
++        mode: AccessControlMode,
++        onSelected: (AccessControlMode) -> Unit,
++    ) {
++        withContext(Dispatchers.Main) {
++            val values = AccessControlMode.values()
++
++            AlertDialog.Builder(context)
++                .setTitle(R.string.access_control_mode)
++                .setSingleChoiceItems(
++                    arrayOf(
++                        context.getString(R.string.allow_all_apps),
++                        context.getString(R.string.allow_selected_apps),
++                        context.getString(R.string.deny_selected_apps),
++                    ),
++                    mode.ordinal,
++                ) { dialog, which ->
++                    dialog.dismiss()
++
++                    onSelected(values[which])
++                }
++                .setNegativeButton(android.R.string.cancel, null)
++                .show()
++        }
++    }
++
+     suspend fun showAbout(versionName: String) {
+         withContext(Dispatchers.Main) {
+             val binding = DesignAboutBinding.inflate(context.layoutInflater).apply {
+diff --git a/design/src/main/res/layout/design_main.xml b/design/src/main/res/layout/design_main.xml
+index 1d02d7b..1d630b4 100644
+--- a/design/src/main/res/layout/design_main.xml
++++ b/design/src/main/res/layout/design_main.xml
+@@ -26,6 +26,12 @@
+         <variable
+             name="hasProviders"
+             type="boolean" />
++        <variable
++            name="accessControlMode"
++            type="String" />
++        <variable
++            name="accessControlPackages"
++            type="String" />
+ 
+         <import type="android.view.View" />
+         <import type="com.github.kr328.clash.design.MainDesign.Request" />
+@@ -116,6 +122,25 @@
+                     app:icon="@drawable/ic_baseline_swap_vertical_circle"
+                     app:text="@string/providers" />
+ 
++                <com.github.kr328.clash.design.view.LargeActionLabel
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:layout_marginVertical="@dimen/main_label_margin_vertical"
++                    android:alpha="@{(clashRunning ? 0.4f : 1.0f)}"
++                    android:onClick="@{() -> self.request(Request.OpenAccessControlMode)}"
++                    app:icon="@drawable/ic_baseline_vpn_lock"
++                    app:subtext="@{accessControlMode}"
++                    app:text="@string/access_control_mode" />
++
++                <com.github.kr328.clash.design.view.LargeActionLabel
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:layout_marginVertical="@dimen/main_label_margin_vertical"
++                    android:onClick="@{() -> self.request(Request.OpenAccessControlPackages)}"
++                    app:icon="@drawable/ic_baseline_get_app"
++                    app:subtext="@{accessControlPackages}"
++                    app:text="@string/access_control_packages" />
++
+                 <com.github.kr328.clash.design.view.LargeActionLabel
+                     android:layout_width="match_parent"
+                     android:layout_height="wrap_content"
+diff --git a/design/src/main/res/values-zh-rHK/strings.xml b/design/src/main/res/values-zh-rHK/strings.xml
+index a63dff7..edd7a95 100644
+--- a/design/src/main/res/values-zh-rHK/strings.xml
++++ b/design/src/main/res/values-zh-rHK/strings.xml
+@@ -261,4 +261,5 @@
+     <string name="override_destination">Override Destination</string>
+     <string name="import_from_qr_no_permission">相機權限受限，請前往設定開啟。</string>
+     <string name="import_from_qr_exception">發生系統未知異常，操作失敗。</string>
++    <string name="format_access_control_packages_selected">已選 %1$d 個應用</string>
+ </resources>
+diff --git a/design/src/main/res/values-zh-rTW/strings.xml b/design/src/main/res/values-zh-rTW/strings.xml
+index 4bc185b..b225235 100644
+--- a/design/src/main/res/values-zh-rTW/strings.xml
++++ b/design/src/main/res/values-zh-rTW/strings.xml
+@@ -261,4 +261,5 @@
+     <string name="override_destination">Override Destination</string>
+     <string name="import_from_qr_no_permission">相機權限受限，請前往設定開啟。</string>
+     <string name="import_from_qr_exception">發生系統未知異常，操作失敗。</string>
++    <string name="format_access_control_packages_selected">已選 %1$d 個應用</string>
+ </resources>
+diff --git a/design/src/main/res/values-zh/strings.xml b/design/src/main/res/values-zh/strings.xml
+index be62f50..95442d7 100644
+--- a/design/src/main/res/values-zh/strings.xml
++++ b/design/src/main/res/values-zh/strings.xml
+@@ -280,4 +280,5 @@
+     <string name="shortcut_start_long">启动 Clash 服务</string>
+     <string name="shortcut_stop_short">停止 Clash</string>
+     <string name="shortcut_stop_long">停止 Clash 服务</string>
++    <string name="format_access_control_packages_selected">已选 %1$d 个应用</string>
+ </resources>
+diff --git a/design/src/main/res/values/strings.xml b/design/src/main/res/values/strings.xml
+index 4e43d3f..39f99ac 100644
+--- a/design/src/main/res/values/strings.xml
++++ b/design/src/main/res/values/strings.xml
+@@ -371,4 +371,5 @@
+     <string name="shortcut_start_long">Start Clash service</string>
+     <string name="shortcut_stop_short">Stop Clash</string>
+     <string name="shortcut_stop_long">Stop Clash service</string>
++    <string name="format_access_control_packages_selected">%1$d apps selected</string>
+ </resources>
